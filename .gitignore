@@ -1,0 +1,58 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+dist/
+
+# Environment variables (SENSITIVE)
+.env
+.env.local
+.env.development
+.env.test
+.env.production
+
+# Database files (contain user data and embeddings)
+*.db
+*.sqlite
+*.sqlite3
+
+# Mem0 generated files
+memory.db
+vector_store.db
+memory-history.db
+
+# IDE/Editor configurations
+.cursor/
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Runtime data
+pids/
+*.pid
+*.seed
+*.pid.lock
+
+# Coverage directory used by tools like istanbul
+coverage/
+
+# nyc test coverage
+.nyc_output/
+
+# macOS
+.DS_Store
+
+# Windows
+Thumbs.db
+
+# Temporary files
+tmp/
+temp/
