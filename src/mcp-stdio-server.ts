@@ -5,12 +5,20 @@
  * 
  * This is a proper MCP server implementation for stdio transport.
  * Cursor will execute this and communicate via stdin/stdout.
+ * 
+ * Features:
+ * - Dual mode support (Mem0 simple vs OSS advanced)
+ * - Retry queue for failed operations
+ * - SQLite backup with WAL mode
+ * - Proper error handling and timeouts
+ * - Graceful shutdown
  */
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { v4 as uuidv4 } from 'uuid';
+import { Memory } from 'mem0ai/oss';
 import MemoryClient from 'mem0ai';
 import sqlite3 from 'sqlite3';
 import { open, Database } from 'sqlite';
@@ -19,33 +27,54 @@ import os from 'os';
 import fs from 'fs';
 import dotenv from 'dotenv';
 
-// Load environment variables
-dotenv.config();
+// Shared modules
+import { MCPConfig } from './shared/types.js';
+import { mcpToolsSchema, methodologyResponse } from './shared/constants.js';
+import { stdioServerInfo, stdioCapabilities } from './shared/stdio-constants.js';
+import { withTimeout, normalizeSearchResults, expandHomeDir, getDefaultStorageDir, formatSearchResults } from './shared/utils.js';
+import { createLogger } from './shared/logger.js';
 
-// Configuration
-const config = {
+// Load environment variables with absolute path
+dotenv.config({ path: '/opt/prj/mcp-zettelkasten-notes-mem0/.env' });
+
+// Configuration interface imported from shared
+
+// Configuration from environment variables
+const config: MCPConfig = {
   mem0ApiKey: process.env.MEM0_API_KEY,
+  openaiApiKey: process.env.OPENAI_API_KEY,
+  mem0SimpleMode: process.env.MEM0_SIMPLE_MODE === 'true',
   userId: process.env.MCP_USER_ID || 'zettelkasten_mcp',
   storageDir: process.env.MCP_STORAGE_DIR,
   mem0TimeoutMs: process.env.MCP_MEM0_TIMEOUT ? parseInt(process.env.MCP_MEM0_TIMEOUT) : 5000,
 };
 
-if (!config.mem0ApiKey) {
-  console.error('[MCP] Missing Mem0 API Key');
+const {
+  mem0ApiKey,
+  openaiApiKey,
+  mem0SimpleMode = true,
+  userId = 'zettelkasten_mcp',
+  storageDir,
+  mem0TimeoutMs = 5000
+} = config as Required<MCPConfig>;
+
+// Validate required API keys based on mode
+if (mem0SimpleMode && !mem0ApiKey) {
+  console.error('[MCP] Missing Mem0 API Key for simple mode');
   console.error('[MCP] Please set MEM0_API_KEY in your environment');
   process.exit(1);
 }
 
-// Setup storage directory
-const defaultDir = path.join(os.homedir(), '.mcp-servers', 'mcp-zettelkasten-notes-mem0');
-function expandHomeDir(filePath: string): string {
-  if (filePath.startsWith('~/') || filePath === '~') {
-    return path.join(os.homedir(), filePath.slice(1));
-  }
-  return filePath;
+if (!mem0SimpleMode && !openaiApiKey) {
+  console.error('[MCP] Missing OpenAI API Key for advanced mode');
+  console.error('[MCP] Please set OPENAI_API_KEY in your environment');
+  process.exit(1);
 }
 
-let dbDir = config.storageDir || defaultDir;
+// Setup storage directory
+const defaultDir = getDefaultStorageDir();
+
+let dbDir = storageDir || defaultDir;
 dbDir = expandHomeDir(dbDir);
 fs.mkdirSync(dbDir, { recursive: true });
 
@@ -56,6 +85,7 @@ let db: Database<sqlite3.Database, sqlite3.Statement>;
 
 async function initDB(): Promise<void> {
   db = await open({ filename: storageFile, driver: sqlite3.Database });
+  // Performance optimizations
   await db.exec('PRAGMA journal_mode=WAL;');
   await db.exec('PRAGMA synchronous=NORMAL;');
   await db.exec(`
@@ -68,118 +98,166 @@ async function initDB(): Promise<void> {
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
   `);
-  console.error('[MCP] SQLite initialized'); // Use stderr for logging
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS retry_queue (
+      id TEXT PRIMARY KEY,
+      payload TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+  `);
+  logger.info(`SQLite initialized at ${storageFile}`);
 }
 
-// Memory setup - using Mem0 managed service
-const memory = new MemoryClient({ apiKey: config.mem0ApiKey });
+// Memory setup - dual mode support
+const memory: any = mem0SimpleMode 
+  ? new MemoryClient({ apiKey: mem0ApiKey })
+  : new Memory({
+      version: 'v1.1',
+      embedder: {
+        provider: 'openai',
+        config: {
+          apiKey: openaiApiKey,
+          model: 'text-embedding-3-small',
+        },
+      },
+      vectorStore: {
+        provider: 'memory',
+        config: {
+          collectionName: 'zettelkasten_memories',
+          dimension: 1536,
+        },
+      },
+      llm: {
+        provider: 'openai',
+        config: {
+          apiKey: openaiApiKey,
+          model: 'gpt-4o-mini',
+        },
+      },
+      historyDbPath: path.join(dbDir, 'memory-history.db'),
+    });
 
-// Utility functions
-function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
-  return Promise.race([
-    promise,
-    new Promise<never>((_, reject) => 
-      setTimeout(() => reject(new Error('Timeout')), ms)
-    )
-  ]);
-}
+// Create logger for STDIO server
+const logger = createLogger('stdio');
 
+logger.info(`Mem0 initialized in ${mem0SimpleMode ? 'SIMPLE' : 'ADVANCED'} mode`);
+
+// Utility functions imported from shared
+
+/**
+ * Sync a note to Mem0 with retry on failure
+ */
 async function syncNoteToMem0(id: string, title: string, content: string): Promise<void> {
   try {
-    const messages = [
-      { role: "user" as const, content: `[${id}] ${title}: ${content}` }
-    ];
+    const payload = mem0SimpleMode 
+      ? [{ role: "user" as const, content: `[${id}] ${title}: ${content}` }]
+      : [
+          { role: 'user', content: `Note: ${title}` },
+          { role: 'assistant', content }
+        ];
+    
+    const options = mem0SimpleMode 
+      ? { user_id: userId }
+      : { userId, metadata: { noteId: id, title } };
+
     await withTimeout(
-      memory.add(messages, { user_id: config.userId }),
-      config.mem0TimeoutMs
+      memory.add(payload, options),
+      mem0TimeoutMs
     );
-    console.error(`[MCP] Note ${id} synced to Mem0`);
+    logger.info(`Note ${id} synced to Mem0`);
   } catch (err: any) {
-    console.error(`[MCP] Mem0 sync failed: ${err.message}`);
+    logger.error(`Mem0 sync failed: ${err.message}`);
+    // Add to retry queue
+    await db.run('INSERT OR REPLACE INTO retry_queue (id,payload) VALUES (?,?)', 
+      id, JSON.stringify({ id, title, content }));
   }
 }
 
+/**
+ * Get note from Mem0 with proper result handling
+ */
 async function getNoteFromMem0(id: string): Promise<{id: string, content: string, via: string} | null> {
   try {
-    const results = await withTimeout(
-      memory.search(`[${id}]`, { user_id: config.userId, limit: 1 }),
-      config.mem0TimeoutMs
+    const query = mem0SimpleMode ? `[${id}]` : `noteId:${id}`;
+    const options = mem0SimpleMode 
+      ? { user_id: userId, limit: 1 }
+      : { userId, limit: 1 };
+
+    const rawResults = await withTimeout(
+      memory.search(query, options),
+      mem0TimeoutMs
     );
-    if (Array.isArray(results) && results.length > 0 && results[0] && 'content' in results[0]) {
-      return { id, content: String(results[0].content), via: 'mem0' };
+    
+    const results = normalizeSearchResults(rawResults);
+    if (results.length > 0) {
+      const content = mem0SimpleMode 
+        ? (results[0].content || results[0].memory || String(results[0]))
+        : results[0].memory;
+      return { id, content: String(content), via: 'mem0' };
     }
   } catch (err: any) {
-    console.error(`[MCP] Mem0 search failed: ${err.message}`);
+    logger.error(`Mem0 search failed: ${err.message}`);
   }
   return null;
 }
 
+/**
+ * Search notes in Mem0 with proper result handling
+ */
+async function searchNotesInMem0(query: string): Promise<any[]> {
+  try {
+    const options = mem0SimpleMode 
+      ? { user_id: userId, limit: 10 }
+      : { userId, limit: 10 };
+
+    const rawResults = await withTimeout(
+      memory.search(query, options),
+      mem0TimeoutMs
+    );
+    
+    return normalizeSearchResults(rawResults);
+  } catch (err: any) {
+    logger.error(`Mem0 search error: ${err.message}`);
+    throw err;
+  }
+}
+
+/**
+ * Retry queue flush
+ */
+async function flushRetryQueue(): Promise<void> {
+  try {
+    const failed = await db.all<{ id: string; payload: string }[]>('SELECT * FROM retry_queue');
+    if (!failed.length) return;
+    
+    logger.info(`Flushing ${failed.length} retry queue item(s)`);
+    for (const row of failed) {
+      try {
+        const { id, title, content }: { id: string; title: string; content: string } = JSON.parse(row.payload);
+        await syncNoteToMem0(id, title, content);
+        await db.run('DELETE FROM retry_queue WHERE id = ?', row.id);
+        logger.info(`Retry synced ${row.id}`);
+      } catch (err: any) {
+        logger.warn(`Retry still failing ${row.id}: ${err.message}`);
+      }
+    }
+  } catch (err: any) {
+    logger.error(`Retry queue flush error: ${err.message}`);
+  }
+}
+
 // Create MCP server
 const server = new Server(
+  stdioServerInfo,
   {
-    name: 'zettelkasten-mem0-server',
-    version: '1.0.0',
-  },
-  {
-    capabilities: {
-      tools: {},
-    },
+    capabilities: stdioCapabilities,
   }
 );
 
 // Tool handlers
 server.setRequestHandler(ListToolsRequestSchema, async () => {
   return {
-    tools: [
-      {
-        name: 'zk_create_note',
-        description: 'Create a new Zettelkasten note with semantic storage',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            title: { type: 'string', description: 'Note title' },
-            content: { type: 'string', description: 'Note content' },
-            tags: { type: 'array', items: { type: 'string' }, description: 'Optional tags' }
-          },
-          required: ['title', 'content']
-        }
-      },
-      {
-        name: 'zk_get_note',
-        description: 'Retrieve a note by ID from semantic memory',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            id: { type: 'string', description: 'Note ID' }
-          },
-          required: ['id']
-        }
-      },
-      {
-        name: 'zk_search_notes',
-        description: 'Search notes semantically using Mem0',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            query: { type: 'string', description: 'Search query' }
-          },
-          required: ['query']
-        }
-      },
-      {
-        name: 'zk_create_link',
-        description: 'Create bidirectional link between notes',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            from: { type: 'string', description: 'Source note ID' },
-            to: { type: 'string', description: 'Target note ID' },
-            type: { type: 'string', description: 'Link type' }
-          },
-          required: ['from', 'to', 'type']
-        }
-      }
-    ]
+    tools: mcpToolsSchema
   };
 });
 
@@ -202,7 +280,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         JSON.stringify([])
       );
       
-      // Store in Mem0
+      // Store in Mem0 (async with retry on failure)
       syncNoteToMem0(id, title, content);
       
       return {
@@ -246,18 +324,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
       
       try {
-        const results = await withTimeout(
-          memory.search(query, { user_id: config.userId, limit: 10 }),
-          config.mem0TimeoutMs
-        );
-        const notes = Array.isArray(results) ? 
-          results.map((m: any) => `ID: ${m.id}\nContent: ${m.memory}`).join('\n\n') : 
-          'No results found';
+        const results = await searchNotesInMem0(query);
+        const notes = formatSearchResults(results, mem0SimpleMode);
         return {
           content: [{ type: 'text', text: `Search results:\n${notes}` }]
         };
       } catch (err: any) {
-        console.error(`[MCP] Mem0 search error: ${err.message}, using SQLite`);
+        logger.warn(`Mem0 search error, using SQLite fallback`);
         const rows = await db.all(
           `SELECT * FROM notes WHERE title LIKE ? OR content LIKE ? ORDER BY created_at DESC LIMIT 10`,
           `%${query}%`, `%${query}%`
@@ -292,6 +365,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         content: [{ type: 'text', text: `Created ${type} link from ${from} to ${to}` }]
       };
 
+    case 'zk_get_methodology':
+      return {
+        content: [{ 
+          type: 'text', 
+          text: `Zettelkasten Methodology with Mem0\n\n${JSON.stringify(methodologyResponse, null, 2)}` 
+        }]
+      };
+
     default:
       throw new Error(`Unknown tool: ${name}`);
   }
@@ -301,33 +382,41 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 async function main() {
   try {
     await initDB();
-    console.error('[MCP] Server initialized');
+    logger.info('Database initialized');
+    
+    // Start retry queue flush interval
+    setInterval(flushRetryQueue, 10000).unref();
+    logger.info('Retry queue started');
     
     const transport = new StdioServerTransport();
     await server.connect(transport);
-    console.error('[MCP] Server started on stdio');
+    logger.info('Server started on stdio');
   } catch (error) {
-    console.error('[MCP] Server error:', error);
+    logger.error(`Server error: ${error}`);
     process.exit(1);
   }
 }
 
 // Handle graceful shutdown
 process.on('SIGINT', async () => {
+  logger.info('Received SIGINT, shutting down gracefully');
   if (db) {
     await db.close();
+    logger.info('Database closed');
   }
   process.exit(0);
 });
 
 process.on('SIGTERM', async () => {
+  logger.info('Received SIGTERM, shutting down gracefully');
   if (db) {
     await db.close();
+    logger.info('Database closed');
   }
   process.exit(0);
 });
 
 main().catch((error) => {
-  console.error('[MCP] Fatal error:', error);
+  logger.error(`Fatal error: ${error}`);
   process.exit(1);
 }); 

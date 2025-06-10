@@ -292,7 +292,7 @@ async function flushRetryQueue(): Promise<void> {
       await withTimeout(
         memory.add([
           { role: 'user', content: `Note: ${title}` },
-          { role: 'assistant', content }
+        { role: 'assistant', content }
         ], { userId, metadata: { noteId: id, title } }),
         mem0TimeoutMs
       );
