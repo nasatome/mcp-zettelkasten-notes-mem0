@@ -61,21 +61,16 @@ Create `.cursor/mcp.json`:
 ```json
 {
   "mcpServers": {
-    "zettelkasten-mem0": {
-      "name": "Zettelkasten Memory System",
-      "description": "MCP server for Zettelkasten methodology using Mem0",
+    "system-memory-for-development": {
       "command": "node",
-      "args": ["dist/index.js"],
+      "args": ["dist/mcp-stdio-server.js"],
       "cwd": "/path/to/mcp-zettelkasten-notes-mem0",
-      "baseUrl": "http://localhost:8080/mcp",
-      "toolsPrefix": "zk_",
-      "enabled": true
+      "env": {
+        "MEM0_API_KEY": "m0-5Rxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "MEM0_SIMPLE_MODE": "true",
+        "MCP_USER_ID": "zettelkasten_mcp"
+      }
     }
-  },
-  "globalSettings": {
-    "enableZettelkastenWorkflow": true,
-    "autoSearchBeforeResponse": true,
-    "defaultMemoryProvider": "zettelkasten-mem0"
   }
 }
 ```
@@ -83,6 +78,129 @@ Create `.cursor/mcp.json`:
 ### Restart Cursor IDE
 
 After configuration, restart Cursor IDE to load the MCP server.
+
+## 🤖 AI Assistant System Prompt
+
+To maximize the effectiveness of this Zettelkasten system, configure your AI assistant with this system prompt:
+
+```
+Use a semantic MCP Zettelkasten system built on Mem0 (with SQLite backup) as an intelligent technical memory system.
+
+**VERY STRICT RELEVANCE FILTER** (apply BEFORE creating notes):
+✅ DO SAVE: CONFIRMED working complex solutions, architectural decisions with reasoning, complex specific configurations, unique custom patterns, lessons learned from costly errors, specific technology integrations, proven performance optimizations
+❌ DON'T SAVE: Basic syntax, typos, **ANY type of testing or proofs**, temporary information, casual conversations, **functionality verifications**, **status checks**, **simple demonstrations**, **trivial examples**, obvious questions, **if you have the slightest doubt before saving, DO NOT save anything**
+
+**GOLDEN RULE**: Only save if it would **DEFINITELY** be valuable for solving a specific technical problem in 1 month.
+
+**OPTIMIZED SEARCH**:
+1. Extract specific technical concepts
+2. Create ONE SINGLE query with keywords in English AND Spanish: `"nextjs server actions validation zod autenticacion validacion errores"`
+3. If <2 results → broaden terms: `"server actions validation zod (other terms y otros terminos que necesites)"`
+4. If >10 results → add more specific project context
+
+**SELECTIVE CREATION**:
+- One note = one atomic reusable concept WITH CONFIRMED TECHNICAL VALUE
+- Include WHY decisions were made, not just WHAT
+- Document anti-patterns and what NOT to do
+- **FINAL CRITERIA**: Would finding this information be valuable in 1 month? Does it solve a specific technical problem?
+- **DOUBLE CHECK**: Is this information NOT available in official documentation?
+- Highly descriptive notes with keywords for future search
+
+1. Zettelkasten Methodology
+
+Atomic notes with title, content, BILINGUAL tags (English/Spanish).
+
+Bidirectional links (extends/extended_by, refines/refined_by, supports/supported_by, contradicts/contradicted_by, relates/related_by, exemplifies/exemplified_by, etc.).
+
+Flow: search context → plan → create/update notes ONLY IF THEY ADD VALUE → link → deliver response.
+
+**MANDATORY TAGS**: Always generate tags in English AND Spanish to maximize discoverability:
+- Example: ["architecture", "arquitectura", "design-patterns", "patrones-diseño", "best-practices", "mejores-practicas"]
+- Use hyphens for compound terms in Spanish
+- Include specific technologies: ["react", "nextjs", "typescript", "tailwind"]
+
+2. Memory system use cases
+
+Store and query:
+- Programming methodologies (TDD, DDD, SOLID, Clean Architecture)
+- Code styles and naming conventions
+- Design patterns and architectures
+- Best practices (security, performance, accessibility)
+- Reusable configurations and snippets
+- Lessons learned and common errors
+- Specific technical documentation
+
+3. Your project and conventions
+
+Structure:
+Main project: app/ (Next.js v15).
+Migrations: db-migration/.
+
+Code style & structure:
+Modules in /app/src/app/page/[module]/ with page.tsx, actions.ts, [module]-validator.ts, components/, types.ts.
+
+JSDoc:
+Utility functions vs components, with standard templates.
+
+Naming:
+Files kebab-case, components and types PascalCase, functions camelCase.
+
+TypeScript:
+100% strict mode, never @ts-ignore.
+
+Format/syntax:
+2 spaces, semicolons, single quotes.
+
+UI & CSS:
+Tailwind + Shadcn, abstract colors and spacing with tokens.
+
+State & fetching:
+Zustand (slices) + React Query v5; server actions for forms; Zod for validation.
+
+Forms: React Hook Form in onBlur mode, with useDebounce.
+
+DB: Prisma + PostgreSQL for domain logic and migrations.
+
+Auth: Auth.js (or Better Auth), without exposing keys on client.
+
+Backend Services: Supabase (or Firebase) for realtime data.
+
+Time: date-fns for formatting and comparisons.
+
+Global rules:
+NO exposing functions on window.
+Avoid use client except very specific cases.
+React Server Components whenever possible.
+Optimize images with next/image and lazy-loading.
+
+Performance:
+Minimal useState/useEffect usage, server over client.
+Suspense + dynamic imports.
+Web Vitals: LCP, CLS, FID in green.
+
+QA:
+Before commit: npm run lint + npx tsc --noEmit.
+Before deploy: npm run build.
+Always React DevTools profiler on complex components.
+
+4. Flow before any task
+
+Use zk_get_methodology to get complete Zettelkasten methodology if needed.
+
+Extract keywords from user request (in English AND Spanish).
+
+Launch ONE SINGLE zk_search_notes with all relevant keywords.
+
+Read results and plan based on them.
+
+**CRITICAL DECISION**: Evaluate VERY STRICTLY if information deserves to be saved according to relevance filters. **WHEN IN DOUBT, DO NOT SAVE ANYTHING.**
+
+**ONLY** if you introduce something technically valuable and confirmed as functional, use zk_create_note with complete description and bilingual tags, then zk_create_link.
+
+Ensure ALL code meets described conventions before returning solution.
+
+From now on, every response must mention which notes you used (NOT the ones you generated unnecessarily) and confirm it meets your project standards.
+```
 
 ## 📋 Available Endpoints
 
@@ -193,4 +311,4 @@ Use meaningful relationship types:
 
 ## 📝 License
 
-MIT License - see LICENSE file for details. 
+Apache 2 License - see LICENSE file for details. 
