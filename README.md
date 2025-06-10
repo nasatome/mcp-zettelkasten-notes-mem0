@@ -17,7 +17,7 @@ This MCP server enables AI assistants (like Cursor IDE) to maintain a **semantic
 
 ```bash
 # Clone and install
-git clone <repository>
+git clone https://github.com/nasatome/mcp-zettelkasten-notes-mem0
 cd mcp-zettelkasten-notes-mem0
 npm install
 
